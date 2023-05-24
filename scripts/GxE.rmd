@@ -1,0 +1,641 @@
+---
+title: "GxE_final_project"
+author: "Vasiliy Zubarev"
+date: "10 05 2023"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(ggplot2)
+library(stats)
+#MLMs
+library(lme4)
+#heatmaps of correlations
+library(pheatmap)
+#PCA visualization
+library(FactoMineR)
+library(factoextra)
+
+#Finlay-Winkinson regression
+#library(devtools)
+#install_github("lian0090/FW")
+library(FW)
+```
+
+```{r}
+all_pheno<-read.csv('SupplTableS1_phenotypes_rawData.txt', header=TRUE, sep=' ')
+head(all_pheno)
+```
+
+##Numbers of observations
+
+```{r}
+all_pheno %>% count(Environment)
+```
+
+Explore observation counts per line and environment:
+
+```{r}
+GxE_counts<-all_pheno %>% count(Genotype, Environment)
+ggplot(GxE_counts, aes(x=Environment, y=Genotype, fill=n))+geom_tile()+theme_classic()+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_blank())+ggtitle("Number of observations per genotype and environment")
+```
+
+The dataset is highly unbalanced. Most lines have 4 observations in several environments, but some lines have another number of observations.
+
+##Percentage of NAs
+
+1) Simply by each row
+
+```{r}
+colMeans(is.na(all_pheno))
+```
+
+We can see that some traits have a lot of NAs.
+
+2) By traits and environment groups:
+
+```{r}
+nas<-as.data.frame(is.na(all_pheno[,c(9:17)]))
+nas$Environment<-all_pheno$Environment
+setDT(nas)
+nas_summary<-nas[, lapply(.SD, mean), by=Environment]
+nas_summary<-gather(nas_summary, key="parameter", value="value", 2:10)
+ggplot(nas_summary, aes(x=parameter, y=Environment, fill=value))+geom_tile()+theme_classic()+ggtitle("NA fraction per place, year and parameter")
+```
+
+## Trait distributions
+
+```{r}
+par(mfrow=c(3,3))
+hist(all_pheno$EV_V4)
+hist(all_pheno$EV_V6)
+hist(all_pheno$PH_V4)
+hist(all_pheno$PH_V6)
+hist(all_pheno$PH_final)
+hist(all_pheno$LO)
+hist(all_pheno$TILL)
+hist(all_pheno$FF)
+hist(all_pheno$MF)
+```
+
+## Correlation analysis
+
+To understand dependencies between phenotypic variables, we use Pearson correlations.
+
+```{r}
+phenotypes<-all_pheno[c(9:17)]
+
+#get rid rows with NAs
+phenotypes<-phenotypes[complete.cases(phenotypes),]
+
+#compute correlations
+cor(phenotypes)
+cor_pheno<-data.frame(cor(phenotypes))
+
+#plot correlation heatmap
+pheatmap(cor_pheno)
+```
+
+We see 2 obvious groups of traits. 
+
+A) EV_V4, EV_V6, PH_V4, PH_V6 positively correlates with p=0.7...0.85.
+
+B) MF and FF positively correlates with p=0.78.
+
+Between these groups there are negative correlations with p=-0.35...-0.5
+
+## Principal Components Analysis
+
+To understand which traits are the most discriminative among all, we use PCA.
+
+```{r}
+pca<-PCA(phenotypes)
+pca$var
+```
+
+```{r}
+#par(mfrow=c(1,2))
+fviz_pca_biplot(pca,
+             geom.ind = "point", 
+             col.ind="blue",
+             col.var="black",
+             addEllipses = TRUE,
+             alpha.ind = 0.15, 
+             legend.title = "Groups"
+)
+fviz_pca_biplot(pca,
+            axes=c(2,3),
+             geom.ind = "point", 
+             col.ind="blue",
+             col.var="black",
+             addEllipses = TRUE,
+             alpha.ind = 0.15, 
+             legend.title = "Groups"
+)
+```
+
+```{r}
+
+```
+
+## Introducing mixed linear models to find the best lines for further breeding
+
+For EV_V4, EV_V6, PH_final, PH_V4, PH_V6 we have measures in all environments, FF - in all but one. Let's start with these traits. Also, some environments does not have all lines measured. Let's start with environments that have all lines.
+
+Correlated variables EV_V4, EV_V6, PH_V4, PH_V6 will be scaled and considered together as a mean of scaled variables.
+
+Firstly drop GOL and TOM sites due to incomplete lines set. Secondly drop lines that are not measured in other sites.
+
+```{r}
+EV_V4_morelines<-all_pheno[c(1:12)] #all predictors and EV_V4 trait
+head(EV_V4_morelines)
+
+#drop environments having a lot of missing data
+EV_V4_morelines_filt<-EV_V4_morelines[! EV_V4_morelines$Environment %in% c("2017.GOL","2017.TOM","2018.GOL","2018.TOM"),]
+
+n_genot<-EV_V4_morelines_filt$Genotype %>% unique() %>% length()
+cat(n_genot, " genotypes prior to the filtering\n")
+
+#drop rows with NAs
+EV_V4_morelines_filt<-EV_V4_morelines_filt[complete.cases(EV_V4_morelines_filt),]
+
+#filter only lines that are measured in all remaining envs/years
+obs_count<-EV_V4_morelines_filt %>% group_by(Genotype, Environment) %>% count() %>% spread(key=Environment, value=n)
+obs_count<-obs_count[complete.cases(obs_count),]
+obs_count
+complete_genot<-obs_count$Genotype
+EV_V4_morelines_filt<-EV_V4_morelines_filt[EV_V4_morelines_filt$Genotype %in% complete_genot,]
+
+#drop rows with NAs again
+EV_V4_morelines_filt<-EV_V4_morelines_filt[complete.cases(EV_V4_morelines_filt),]
+
+cat(length(complete_genot), " genotypes after the filtering")
+```
+
+Scaling and computing mean
+
+```{r}
+#EV_V4_morelines_filt$EV_V4<-scale()
+EV_V4_morelines_filt$EV_V4<-scale(EV_V4_morelines_filt$EV_V4)
+EV_V4_morelines_filt$EV_V6<-scale(EV_V4_morelines_filt$EV_V6)
+EV_V4_morelines_filt$PH_V4<-scale(EV_V4_morelines_filt$PH_V4)
+EV_V4_morelines_filt$PH_V6<-scale(EV_V4_morelines_filt$PH_V6)
+EV_V4_morelines_filt$EV<-(EV_V4_morelines_filt$EV_V4+EV_V4_morelines_filt$EV_V6+EV_V4_morelines_filt$PH_V4+EV_V4_morelines_filt$PH_V6)/4
+head(EV_V4_morelines_filt)
+hist(EV_V4_morelines_filt$EV)
+```
+
+```{r}
+write.csv(EV_V4_morelines_filt[c(1:8,13)], "earlyvigour_filtered_7envs.csv", row.names=FALSE, quote=FALSE )
+```
+
+
+```{r}
+sum(is.na(EV_V4_morelines_filt))
+tail(EV_V4_morelines_filt)
+```
+
+```{r}
+mixed.lmer <- lmer(EV ~ Environment+(1|Genotype)+(1|Block), data = EV_V4_morelines_filt)
+```
+
+```{r}
+plot(mixed.lmer)
+qqnorm(resid(mixed.lmer))
+qqline(resid(mixed.lmer))
+```
+
+Define a function to get BLUPs (from Alexey Zamalutdinov)
+
+```{r}
+pev_rel_estimation <- function(model) {
+  # Using Henderson's equations
+  
+  X <- getME(model,'X')
+  Z <- getME(model,'Z')
+  Y <- getME(model,'y')
+  
+  # model w/o genetic relationships
+  varianceestimates <- as.data.frame(VarCorr(model))[,4]
+  se <- varianceestimates[2]
+  su <- varianceestimates[1]
+  
+  lambda <- se/su
+  Iu <- diag(length(levels(as.factor(EV_V4_morelines_filt$Genotype)))+length(levels(as.factor(EV_V4_morelines_filt$Block))))
+  #length(levels(as.factor(EV_V4_morelines_filt$Genotype)))+length(levels(as.factor(EV_V4_morelines_filt$Block)))
+  
+  XpX <- crossprod(X)
+  XpZ <- crossprod(X, Z)
+  ZpX <- crossprod(Z, X)
+  ZpZ <- crossprod(Z)
+  XpY <- crossprod(X, Y)
+  ZpY <- crossprod(Z, Y)
+  
+
+  ## LHS
+  LHS <- rbind(cbind(XpX, XpZ),
+               cbind(ZpX, ZpZ + Iu * lambda))
+  #print(LHS)
+  
+  ## RHS
+  RHS <- rbind(XpY, 
+               ZpY)
+ 
+  # Inverse of LHS
+  InvLHS <- round(solve(LHS), digit=3) ; size <- dim(InvLHS)[[1]]
+  #print(InvLHS)
+  cat("size: ",size)
+  PEVpre <- diag(InvLHS)[ 8 : size]
+  #print(PEVpre)
+  #' and then corresponding values:
+  PEV <- PEVpre * se
+  SEP <- sqrt(PEV)
+  REL <- 1 - PEV / su
+  
+  solutions <- as.data.frame(ranef(model)) 
+  cat("solutions len ",length(solutions[, 3]),"\n")
+  cat("SEP len ",length(SEP),"\n")
+  cat("PEV len ",length(PEV),"\n")
+  return(data.frame(variety_name = solutions[, 3],
+                    BLUP = solutions[, 4],
+                    PEV = PEV,
+                    SEP = SEP,
+                    REL = REL))
+}
+```
+
+```{r}
+answer<-pev_rel_estimation(mixed.lmer)
+```
+
+```{r}
+genot_EV_BLUPs<-answer[c((1717-696):1717),c(1,2)]
+genot_EV_BLUPs<-genot_EV_BLUPs[order(-genot_EV_BLUPs$BLUP),]
+(topten_list<-genot_EV_BLUPs[c(1:10),1])
+topten_df<-all_pheno[all_pheno$Genotype %in% topten_list,]
+topten_list
+#drop rows with NAs
+#topten_df<-topten_df[complete.cases(topten_df),]
+#write.csv(topten_df, "./earlyvigor_top10_allpheno.csv", row.names=FALSE, quote=FALSE)
+```
+
+## Finley-Wilkinson
+
+```{r}
+Indexes <- EV_V4_morelines_filt %>% group_by(Environment) %>% summarise(Index = mean(EV))
+Indexes$Index <- Indexes$Index - mean(EV_V4_morelines_filt$EV) ## do not forget
+Indexes
+EV_V4_morelines_filt <- left_join(EV_V4_morelines_filt, Indexes)
+head(EV_V4_morelines_filt)
+```
+
+```{r}
+JointReg <- lmer(EV ~ Environment + Genotype + Genotype:Index + (1|Block), data = EV_V4_morelines_filt)
+```
+
+```{r}
+plot(JointReg)
+qqnorm(resid(JointReg))
+qqline(resid(JointReg))
+```
+
+```{r}
+toto <- data.frame(EV_V4_morelines_filt, predicted = predict(JointReg))
+head(toto)
+```
+
+```{r}
+toto %>% filter(Genotype %in% topten_list) %>% ggplot(aes(x = Index, y = predicted, group = Genotype,
+colour = Genotype)) + geom_point() + geom_smooth(method='lm', formula='y~x', se=FALSE) + geom_abline(slope = 1,
+intercept = mean(EV_V4_morelines_filt$EV), lty = 2) + geom_vline(xintercept = 0, lty = 2) + theme(plot.background = element_rect(fill = "aliceblue"),
+plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+```
+
+## Analyze flowering time
+
+For a first time, by simple mixed-effects model with no GxE
+
+```{r}
+Flo<-all_pheno[,c(1:8,16,17)]
+Flo$MF<-scale(Flo$MF)
+Flo$FF<-scale(Flo$FF)
+Flo$FT<-rowMeans(Flo[,9:10], na.rm=TRUE)
+#drop rows with NAs again
+Flo<-Flo[complete.cases(Flo$FT),]
+head(Flo)
+```
+
+```{r}
+lmer_flo <- lmer(FT ~ Environment+(1|Genotype)+(1|Block), data = Flo)
+```
+
+```{r}
+plot(lmer_flo)
+qqnorm(resid(lmer_flo))
+qqline(resid(lmer_flo))
+```
+
+```{r}
+pev_rel_estimation <- function(model) {
+  # Using Henderson's equations
+  
+  X <- getME(model,'X')
+  Z <- getME(model,'Z')
+  Y <- getME(model,'y')
+  
+  # model w/o genetic relationships
+  varianceestimates <- as.data.frame(VarCorr(model))[,4]
+  se <- varianceestimates[2]
+  su <- varianceestimates[1]
+  
+  lambda <- se/su
+  Iu <- diag(length(levels(as.factor(Flo$Genotype)))+length(levels(as.factor(Flo$Block))))
+  #length(levels(as.factor(EV_V4_morelines_filt$Genotype)))+length(levels(as.factor(EV_V4_morelines_filt$Block)))
+  
+  XpX <- crossprod(X)
+  XpZ <- crossprod(X, Z)
+  ZpX <- crossprod(Z, X)
+  ZpZ <- crossprod(Z)
+  XpY <- crossprod(X, Y)
+  ZpY <- crossprod(Z, Y)
+  
+
+  ## LHS
+  LHS <- rbind(cbind(XpX, XpZ),
+               cbind(ZpX, ZpZ + Iu * lambda))
+  #print(LHS)
+  
+  ## RHS
+  RHS <- rbind(XpY, 
+               ZpY)
+ 
+  # Inverse of LHS
+  InvLHS <- round(solve(LHS), digit=3) ; size <- dim(InvLHS)[[1]]
+  #print(InvLHS)
+  cat("size: ",size)
+  PEVpre <- diag(InvLHS)[ 11 : size]
+  #print(PEVpre)
+  #' and then corresponding values:
+  PEV <- PEVpre * se
+  SEP <- sqrt(PEV)
+  REL <- 1 - PEV / su
+  
+  solutions <- as.data.frame(ranef(model)) 
+  cat("solutions len ",length(solutions[, 3]),"\n")
+  cat("SEP len ",length(SEP),"\n")
+  cat("PEV len ",length(PEV),"\n")
+  return(data.frame(variety_name = solutions[, 3],
+                    BLUP = solutions[, 4],
+                    PEV = PEV,
+                    SEP = SEP,
+                    REL = REL))
+}
+```
+
+```{r}
+answer_Flo<-pev_rel_estimation(lmer_flo)
+```
+
+```{r}
+(genot_FT_BLUPs<-answer[c(1021:1973),c(1,2)])
+(genot_FT_BLUPs<-genot_FT_BLUPs[order(genot_FT_BLUPs$BLUP),])
+(topten_list_Flo<-genot_FT_BLUPs[c(1:10),1])
+topten_df_Flo<-all_pheno[all_pheno$Genotype %in% topten_list,]
+topten_list_Flo
+#drop rows with NAs
+#topten_df<-topten_df[complete.cases(topten_df),]
+#write.csv(topten_df, "./earlyvigor_top10_allpheno.csv", row.names=FALSE, quote=FALSE)
+```
+
+
+```{r}
+```
+
+
+With a FW regression
+
+```{r}
+Indexes <- Flo %>% group_by(Environment) %>% summarise(Index = mean(FT))
+Indexes$Index <- Indexes$Index - mean(Flo$FT) ## do not forget
+Indexes
+Flo <- left_join(Flo, Indexes)
+head(Flo)
+```
+
+```{r}
+JointRegFlo <- lmer(FT ~ Environment + Genotype + Genotype:Index + (1|Block), data = Flo)
+```
+
+```{r}
+#summary(JointRegFlo)
+Flo_geneff<-data.frame(fixef(JointRegFlo))
+Flo_geneff$Genotype<-rownames(Flo_geneff)
+Flo_geneff<-data.frame(Flo_geneff[c(11:nrow(Flo_geneff)),])
+(Flo_geneff<-Flo_geneff[order(Flo_geneff$fixef.JointRegFlo.),])
+```
+
+```{r}
+plot(JointRegFlo)
+qqnorm(resid(JointRegFlo))
+qqline(resid(JointRegFlo))
+```
+
+```{r}
+
+```
+
+
+```{r}
+toto_Flo <- data.frame(Flo, predicted = predict(JointRegFlo))
+toto_Flo %>% filter(Genotype %in% topten_list_Flo)
+```
+
+```{r}
+toto_Flo %>% filter(Genotype %in% c("DH_PE0539", "DH_LL0018", "DH_LL0018", "DH_PE0452", "DH_PE0025", "DH_KE0281", "DH_KE0239", "DH_PE0423", "DH_KE0239", "DH_KE0188", "DH_PE0060", "DH_PE0506")) %>% ggplot(aes(x = Index, y = predicted, group = Genotype,
+colour = Genotype)) + geom_point() + geom_smooth(method='lm', formula='y~x', se=FALSE) + geom_abline(slope = 1,
+intercept = mean(Flo$FT), lty = 2) + geom_vline(xintercept = 0, lty = 2) + theme(plot.background = element_rect(fill = "aliceblue"),
+plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+```
+
+## Analyzing lodging score
+
+```{r}
+Lod<-all_pheno[,c(1:8,14)]
+#drop rows with NAs again
+Lod<-Lod[complete.cases(Lod$LO),]
+head(Lod)
+```
+
+```{r}
+#lmer_lod<-lmer(LO ~ Environment + Genotype + Genotype:Index+(1|Block), data = Lod)
+```
+
+```{r}
+#lmer_without_int_lod<-lmer(LO ~ Environment+(1|Genotype)+(1|Block), data = Lod)
+```
+
+
+```{r}
+#plot(lmer_without_int_lod)
+#qqnorm(resid(lmer_without_int_lod))
+#qqline(resid(lmer_without_int_lod))
+```
+
+```{r}
+#plot(lmer_lod)
+#qqnorm(resid(lmer_lod))
+#qqline(resid(lmer_lod))
+```
+
+```{r}
+#summary(JointRegFlo)
+#Lod_geneff<-data.frame(fixef(lmer_lod))
+#Lod_geneff$Genotype<-rownames(Lod_geneff)
+#Lod_geneff<-data.frame(Lod_geneff[c(5:nrow(Lod_geneff)),])
+#(Lod_geneff<-Lod_geneff[order(Lod_geneff$fixef.lmer_lod.),])
+```
+
+```{r}
+#toto_Lod %>% filter(Genotype %in% c("DH_PE0053", "DH_PE0279", "DH_PE0386", #"DH_PE0039", "DH_KE0474", "DH_KE0631", "DH_PE0320", "DH_PE0113", #"DH_PE0007")) %>% ggplot(aes(x = Index, y = predicted, group = Genotype,
+#colour = Genotype)) + geom_point() + geom_smooth(method='lm', #formula='y~x', se=FALSE) + geom_abline(slope = 1,
+#intercept = mean(Lod$LO), lty = 2) + geom_vline(xintercept = 0, lty = 2) + #theme(plot.background = element_rect(fill = "aliceblue"),
+#plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+```
+
+```{r}
+#toto_Lod <- data.frame(Lod, predicted = predict(lmer_lod))
+```
+
+```{r}
+#lm1 <- FW(y = METmaize$yield, VAR = METmaize$Genotype, ENV = #METmaize$Environ,
+#method = "OLS")
+```
+
+```{r}
+```
+
+
+
+Predict EV value from the model, excluding block term
+
+```{r}
+#form<-EV ~ Environment+(1|Genotype)+(1|Block)
+#(bar.f <- findbars(form)) # list with 3 terms
+#mf <- model.frame(subbars(form),data=EV_V4_morelines_filt)
+#rt <- mkReTrms(bar.f,mf)
+#names(rt)
+```
+
+```{r}
+#x<-EV_V4_morelines_filt[c(1,2), c('Genotype', 'Environment', 'Block')]
+#x
+#predict(mixed.lmer, newdata=x, re.form=rt, allow.new.levels = TRUE)
+```
+
+
+```{r}
+#EV_V4_morelines_model<-lmer()
+```
+
+```{r}
+#n=5
+#cat("n = ", n)
+```
+
+
+
+
+
+
+Find the subset of lines that are measured in completely all environments
+
+```{r}
+filtered<-all_pheno #all predictors and EV_V4 trait
+
+#drop environments having a lot of missing data
+EV_V4_morelines_filt<-EV_V4_morelines[! EV_V4_morelines$Environment %in% c("2017.GOL","2017.TOM","2018.GOL","2018.TOM"),]
+
+n_genot<-filtered$Genotype %>% unique() %>% length()
+cat(n_genot, " genotypes prior to the filtering\n")
+
+#filter only lines that are measured in all remaining envs/years
+obs_count<-filtered %>% group_by(Genotype, Environment) %>% count() %>% spread(key=Environment, value=n)
+obs_count<-obs_count[complete.cases(obs_count),]
+obs_count
+complete_genot<-obs_count$Genotype
+filtered<-filtered[filtered$Genotype %in% complete_genot,]
+
+#drop rows with NAs again
+#EV_V4_morelines_filt<-EV_V4_morelines_filt[complete.cases(EV_V4_morelines_filt),]
+
+
+
+cat(length(complete_genot), " genotypes after the filtering")
+```
+
+```{r}
+GxE_filtcounts<-filtered %>% count(Genotype, Environment)
+ggplot(GxE_filtcounts, aes(x=Environment, y=Genotype, fill=n))+geom_tile()+theme_classic()+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_blank())+ggtitle("Number of observations per genotype and environment")
+```
+
+```{r}
+nas<-as.data.frame(is.na(filtered[,c(9:17)]))
+nas$Environment<-filtered$Environment
+setDT(nas)
+nas_summary<-nas[, lapply(.SD, mean), by=Environment]
+nas_summary<-gather(nas_summary, key="parameter", value="value", 2:10)
+ggplot(nas_summary, aes(x=parameter, y=Environment, fill=value))+geom_tile()+theme_classic()+ggtitle("NA fraction per place, year and parameter")
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+```
+
+```{r}
+#mean(c(1,NA,3), )
+```
+
